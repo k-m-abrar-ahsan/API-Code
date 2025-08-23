@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stripe + FastAPI Checkout</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Stripe.js -->
+    <script src="https://js.stripe.com/v3/"></script>
+    <style>
+        /* Simple spinner for loading state */
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            border-left-color: #09f;
+            animation: spin 1s ease infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen font-sans">
+
+    <div class="w-full max-w-md p-8 space-y-6 bg-white rounded-xl shadow-lg">
+        <h1 class="text-2xl font-bold text-center text-gray-800">Secure Payment</h1>
+
+        <!-- Payment Form -->
+        <form id="payment-form" class="space-y-6">
+            <!-- Amount and Currency Input -->
+            <div>
+                <label for="amount" class="block text-sm font-medium text-gray-700">Amount</label>
+                <div class="mt-1 relative rounded-md shadow-sm">
+                    <div class="pointer-events-none absolute inset-y-0 left-0 pl-3 flex items-center">
+                        <span class="text-gray-500 sm:text-sm">$</span>
+                    </div>
+                    <input type="number" id="amount" name="amount" class="block w-full rounded-md border-gray-300 pl-7 pr-12 focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" placeholder="10.99" step="0.01" required>
+                    <div class="absolute inset-y-0 right-0 flex items-center">
+                        <select id="currency" name="currency" class="h-full rounded-md border-transparent bg-transparent py-0 pl-2 pr-7 text-gray-500 focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                            <option>USD</option>
+                            <option>EUR</option>
+                            <option>GBP</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Stripe Payment Element will be inserted here -->
+            <div id="payment-element" class="p-2 border rounded-md bg-gray-50"></div>
+
+            <!-- Pay Button -->
+            <button id="submit" class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50">
+                <span id="button-text">Pay Now</span>
+                <div id="spinner" class="spinner hidden" style="width: 20px; height: 20px; border-width: 2px;"></div>
+            </button>
+
+            <!-- Used to display form errors -->
+            <div id="payment-message" class="hidden text-center text-sm text-red-600"></div>
+        </form>
+    </div>
+
+    <script>
+        // 1. Set up your keys
+        // ✅ Replace with your own Stripe Publishable Key
+        const stripe = Stripe('pk_test_51RyW3CLwvRD1CARHeKoyBhwawZ3FF4VejrHcZJw4c1RxevZA0FNXzja13WkKo6jxDtbwCHVDTBSNgDj8iBqUqkkG00wI10p6Ju'); 
+
+        // 2. DOM selectors
+        const form = document.getElementById('payment-form');
+        const submitButton = document.getElementById('submit');
+        const buttonText = document.getElementById('button-text');
+        const spinner = document.getElementById('spinner');
+        const messageContainer = document.getElementById('payment-message');
+        
+        let elements; // Stripe Elements instance
+        let paymentElement; // Keep a reference to the payment element
+
+        // 3. Initialize the form as soon as the page loads
+        initialize();
+
+        async function initialize() {
+            // Create a temporary payment intent to initialize the form
+            // The real payment intent with the final amount will be created on submit
+            const { clientSecret } = await createPaymentIntent(100, 'usd'); // e.g., $1.00 placeholder
+            
+            if (clientSecret) {
+                const appearance = { theme: 'stripe' };
+                elements = stripe.elements({ appearance, clientSecret });
+                paymentElement = elements.create("payment");
+                paymentElement.mount("#payment-element");
+            } else {
+                showMessage("Could not initialize payment form.");
+            }
+        }
+
+        // 4. Event listener for form submission
+        form.addEventListener('submit', handleSubmit);
+
+        // 5. Main submission handler
+        async function handleSubmit(e) {
+            e.preventDefault();
+            setLoading(true);
+
+            const amountInput = document.getElementById('amount').value;
+            const currencyInput = document.getElementById('currency').value.toLowerCase();
+            
+            const amountInCents = Math.round(parseFloat(amountInput) * 100);
+
+            if (isNaN(amountInCents) || amountInCents <= 0) {
+                showMessage("Please enter a valid amount.");
+                setLoading(false);
+                return;
+            }
+
+            // 6. Create the final Payment Intent with the correct amount
+            const { clientSecret, error: backendError } = await createPaymentIntent(amountInCents, currencyInput);
+
+            if (backendError) {
+                showMessage(backendError.message);
+                setLoading(false);
+                return;
+            }
+
+            // IMPORTANT: Elements are tied to the clientSecret used to initialize them.
+            // If we created a new PaymentIntent on submit, recreate Elements with that clientSecret
+            // so stripe.confirmPayment uses the correct intent and can redirect to return_url.
+            if (clientSecret) {
+                const appearance = { theme: 'stripe' };
+                try {
+                    // Unmount any previous element to avoid duplicates
+                    if (paymentElement) {
+                        paymentElement.unmount();
+                    }
+                } catch (err) {
+                    // ignore if unmount fails for any reason
+                    console.warn('Failed to unmount existing payment element:', err);
+                }
+
+                elements = stripe.elements({ appearance, clientSecret });
+                paymentElement = elements.create("payment");
+                paymentElement.mount("#payment-element");
+            }
+
+            // 7. Confirm the payment on the client
+            const { error } = await stripe.confirmPayment({
+                elements,
+                clientSecret, // Pass the new client secret
+                confirmParams: {
+                    return_url: `C:\Users\Abrar\Desktop\api\success.html`,
+                },
+            });
+            
+            // This point is only reached if there is an immediate error.
+            // Otherwise, the user is redirected to the return_url.
+            if (error) {
+                if (error.type === "card_error" || error.type === "validation_error") {
+                    showMessage(error.message);
+                } else {
+                    showMessage("An unexpected error occurred.");
+                }
+                // Only stop loading if there was an error
+                setLoading(false);
+            }
+        }
+
+        // --- HELPER FUNCTIONS ---
+
+        // Fetches a payment intent from your FastAPI server
+        async function createPaymentIntent(amount, currency) {
+            try {
+                const response = await fetch("http://127.0.0.1:8000/create-payment-intent", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ amount, currency }),
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || `Server error: ${response.status}`);
+                }
+                
+                return await response.json();
+            } catch (error) {
+                console.error("Failed to create payment intent:", error);
+                return { error: { message: "Could not connect to the payment server." } };
+            }
+        }
+
+        // --- UI HELPER FUNCTIONS ---
+
+        function showMessage(messageText) {
+            messageContainer.classList.remove('hidden');
+            messageContainer.textContent = messageText;
+
+            setTimeout(function () {
+                messageContainer.classList.add('hidden');
+                messageContainer.textContent = '';
+            }, 5000);
+        }
+
+        function setLoading(isLoading) {
+            submitButton.disabled = isLoading;
+            if (isLoading) {
+                buttonText.classList.add('hidden');
+                spinner.classList.remove('hidden');
+            } else {
+                buttonText.classList.remove('hidden');
+                spinner.classList.add('hidden');
+            }
+        }
+    </script>
+</body>
+</html>
